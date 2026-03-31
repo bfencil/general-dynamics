@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "GeneralDynamics"
+version = "0.1.0"
+description = "Tools for dynamical systems, FTLE computation, and flow analysis"
+authors = [
+    { name = "null" }
+]
+readme = "README.md"
+requires-python = ">=3.9"
+
+dependencies = [
+    "numpy",
+    "matplotlib"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["GeneralDynamics*"]
