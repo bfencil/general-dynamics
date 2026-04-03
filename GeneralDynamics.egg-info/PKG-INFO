@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: GeneralDynamics
+Version: 0.1.0
+Summary: Tools for dynamical systems, FTLE computation, and flow analysis
+Author: null
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: numpy
+Requires-Dist: matplotlib
+
+null
