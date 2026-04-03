@@ -2,7 +2,13 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 
-def compute_FTLE_2D_gridDomain(flow_map, final_time_index):
+import numpy as np
+
+
+
+
+
+def compute_FTLE_2D_gridDomain(flow_map, final_time_index, time_array=None):
     """
     Compute FTLE values on a 2D uniform grid from a flow map.
 
@@ -16,31 +22,70 @@ def compute_FTLE_2D_gridDomain(flow_map, final_time_index):
     final_time_index : int
         Last time index to compute FTLE for.
 
+    time_array : array-like or None, optional
+        Time values associated with the third axis of flow_map.
+        If None, the default discrete time array [0, 1, 2, ..., nt-1] is used.
+
     Returns
     -------
     FTLE : ndarray, shape (nx, ny, final_time_index+1)
         FTLE field.
-        FTLE[:,:,0] = 0 by definition.
+        FTLE[:, :, 0] = 0 by definition.
+
+    Notes
+    -----
+    The initial time is always taken to be index 0.
+
+    The deformation gradient is computed as
+
+        F = D Phi_t
+
+    and the Cauchy-Green tensor is
+
+        C = F^T F.
+
+    Then FTLE is computed as
+
+        FTLE = (1 / (2 |T|)) * log(lambda_max(C))
+
+    where
+
+        T = time_array[t] - time_array[0].
     """
 
-    flow_map = np.asarray(flow_map)
+    flow_map = np.asarray(flow_map, dtype=float)
 
     if flow_map.ndim != 4 or flow_map.shape[-1] != 2:
-        raise ValueError(
-            "flow_map must have shape (nx, ny, nt, 2)"
-        )
+        raise ValueError("flow_map must have shape (nx, ny, nt, 2)")
 
     nx, ny, nt, _ = flow_map.shape
 
-    if final_time_index >= nt:
-        raise ValueError("final_time_index must be less than number of time steps.")
+    if final_time_index < 0 or final_time_index >= nt:
+        raise ValueError("final_time_index must satisfy 0 <= final_time_index < nt.")
 
-    # Initial grid (t = 0)
+    if time_array is None:
+        time_array = np.arange(nt, dtype=float)
+    else:
+        time_array = np.asarray(time_array, dtype=float)
+        if time_array.ndim != 1:
+            raise ValueError("time_array must be one-dimensional.")
+        if len(time_array) != nt:
+            raise ValueError("time_array must have length equal to the number of time steps.")
+        if not np.all(np.isfinite(time_array)):
+            raise ValueError("time_array must contain only finite values.")
+
+    # Initial grid (always t = 0)
     x0 = flow_map[:, :, 0, 0]
     y0 = flow_map[:, :, 0, 1]
 
+    if nx < 2 or ny < 2:
+        raise ValueError("flow_map must have at least 2 grid points in each spatial direction.")
+
     delta_x = x0[1, 0] - x0[0, 0]
     delta_y = y0[0, 1] - y0[0, 0]
+
+    if not np.isfinite(delta_x) or not np.isfinite(delta_y):
+        raise ValueError("Initial grid spacing is not finite.")
 
     if delta_x == 0 or delta_y == 0:
         raise ValueError("Zero grid spacing detected.")
@@ -49,26 +94,26 @@ def compute_FTLE_2D_gridDomain(flow_map, final_time_index):
     delta_y = float(delta_y)
 
     FTLE = np.full((nx, ny, final_time_index + 1), np.nan, dtype=float)
-
-    # FTLE at t=0
     FTLE[:, :, 0] = 0.0
 
     for t in range(1, final_time_index + 1):
+        T = float(time_array[t] - time_array[0])
 
-        T = float(t)
+        if T == 0:
+            FTLE[:, :, t] = np.nan
+            continue
 
         Xt = flow_map[:, :, t, 0]
         Yt = flow_map[:, :, t, 1]
 
         for i in range(1, nx - 1):
             for j in range(1, ny - 1):
-
                 local_values = np.array([
                     Xt[i - 1, j], Xt[i + 1, j],
                     Xt[i, j - 1], Xt[i, j + 1],
                     Yt[i - 1, j], Yt[i + 1, j],
                     Yt[i, j - 1], Yt[i, j + 1]
-                ])
+                ], dtype=float)
 
                 if not np.all(np.isfinite(local_values)):
                     continue
@@ -85,14 +130,13 @@ def compute_FTLE_2D_gridDomain(flow_map, final_time_index):
                 ], dtype=float)
 
                 C = F.T @ F
-
                 eigvals = np.linalg.eigvalsh(C)
                 lambda_max = np.max(eigvals)
 
-                if lambda_max <= 0 or not np.isfinite(lambda_max):
+                if not np.isfinite(lambda_max) or lambda_max <= 0:
                     continue
 
-                FTLE[i, j, t] = (1.0 / (2.0 * T)) * np.log(lambda_max)
+                FTLE[i, j, t] = (1.0 / (2.0 * abs(T))) * np.log(lambda_max)
 
     return FTLE
 
@@ -101,9 +145,7 @@ def compute_FTLE_2D_gridDomain(flow_map, final_time_index):
 
 
 
-
-
-def compute_FTLE_2D_sparse(flow_map, final_time_index, k_neighbors=10):
+def compute_FTLE_2D_sparse(flow_map, final_time_index, k_neighbors=10, time_array=None):
     """
     Compute 2D FTLE values from a sparse flow map using local least-squares
     estimation of the deformation gradient.
@@ -124,6 +166,10 @@ def compute_FTLE_2D_sparse(flow_map, final_time_index, k_neighbors=10):
         which is discarded internally) used to estimate the local deformation
         gradient.
 
+    time_array : array-like or None, optional
+        Time values associated with the third axis of flow_map.
+        If None, the default discrete time array [0, 1, 2, ..., n_times-1] is used.
+
     Returns
     -------
     FTLE : ndarray, shape (n_points, final_time_index + 1)
@@ -132,6 +178,8 @@ def compute_FTLE_2D_sparse(flow_map, final_time_index, k_neighbors=10):
 
     Notes
     -----
+    The initial time is always taken to be index 0.
+
     For each point p and time t, we estimate F by solving
 
         ΔX_t ≈ F ΔX_0
@@ -144,9 +192,11 @@ def compute_FTLE_2D_sparse(flow_map, final_time_index, k_neighbors=10):
 
     and the FTLE is
 
-        FTLE = (1 / (2 * t)) * log(lambda_max(C))
+        FTLE = (1 / (2 * |T|)) * log(lambda_max(C))
 
-    since the time array is assumed to be [0, 1, 2, ...].
+    where
+
+        T = time_array[t] - time_array[0].
     """
 
     flow_map = np.asarray(flow_map, dtype=float)
@@ -159,8 +209,8 @@ def compute_FTLE_2D_sparse(flow_map, final_time_index, k_neighbors=10):
     if dim != 2:
         raise ValueError("flow_map must have shape (n_points, 2, n_times).")
 
-    if final_time_index >= n_times:
-        raise ValueError("final_time_index must be less than the number of time steps.")
+    if final_time_index < 0 or final_time_index >= n_times:
+        raise ValueError("final_time_index must satisfy 0 <= final_time_index < n_times.")
 
     if k_neighbors < 3:
         raise ValueError("k_neighbors must be at least 3.")
@@ -168,57 +218,72 @@ def compute_FTLE_2D_sparse(flow_map, final_time_index, k_neighbors=10):
     if k_neighbors >= n_points:
         raise ValueError("k_neighbors must be smaller than the number of points.")
 
+    if time_array is None:
+        time_array = np.arange(n_times, dtype=float)
+    else:
+        time_array = np.asarray(time_array, dtype=float)
+        if time_array.ndim != 1:
+            raise ValueError("time_array must be one-dimensional.")
+        if len(time_array) != n_times:
+            raise ValueError("time_array must have length equal to the number of time steps.")
+        if not np.all(np.isfinite(time_array)):
+            raise ValueError("time_array must contain only finite values.")
+
     FTLE = np.full((n_points, final_time_index + 1), np.nan, dtype=float)
     FTLE[:, 0] = 0.0
 
-    # Initial positions
+    # Initial positions at t = 0
     X0 = flow_map[:, :, 0]
 
     # Check validity of initial positions
     valid_initial = np.all(np.isfinite(X0), axis=1)
-
-    # Build KDTree on valid initial points only
     valid_indices = np.where(valid_initial)[0]
+
     if len(valid_indices) < k_neighbors + 1:
         raise ValueError("Not enough valid initial points for the requested k_neighbors.")
 
+    # KDTree on valid initial points
     X0_valid = X0[valid_indices]
     tree = cKDTree(X0_valid)
 
-    # For each valid point, precompute neighbors in the initial configuration
+    # Precompute neighbors in the initial configuration
     neighbor_map = {}
 
-    for local_idx, global_idx in enumerate(valid_indices):
-        dists, nbrs_local = tree.query(X0[global_idx], k=k_neighbors + 1)
+    for global_idx in valid_indices:
+        _, nbrs_local = tree.query(X0[global_idx], k=k_neighbors + 1)
 
-        # Remove self if present
         nbrs_local = np.atleast_1d(nbrs_local)
         nbrs_global = valid_indices[nbrs_local]
+
+        # Remove self
         nbrs_global = nbrs_global[nbrs_global != global_idx]
 
-        # Keep exactly k_neighbors if possible
+        # Keep requested number of neighbors
         nbrs_global = nbrs_global[:k_neighbors]
 
         neighbor_map[global_idx] = nbrs_global
 
     for t in range(1, final_time_index + 1):
+        T = float(time_array[t] - time_array[0])
+
+        if T == 0:
+            FTLE[:, t] = np.nan
+            continue
+
         Xt = flow_map[:, :, t]
 
         for p in valid_indices:
             nbrs = neighbor_map[p]
 
             if len(nbrs) < 2:
-                FTLE[p, t] = np.nan
                 continue
 
             x0_p = X0[p]
             xt_p = Xt[p]
 
             if not np.all(np.isfinite(xt_p)):
-                FTLE[p, t] = np.nan
                 continue
 
-            # Build neighbor offset matrices
             dX0_list = []
             dXt_list = []
 
@@ -239,20 +304,16 @@ def compute_FTLE_2D_sparse(flow_map, final_time_index, k_neighbors=10):
                 dXt_list.append(dXt)
 
             if len(dX0_list) < 2:
-                FTLE[p, t] = np.nan
                 continue
 
-            # Shape: (m, 2)
-            A = np.asarray(dX0_list, dtype=float)
-            B = np.asarray(dXt_list, dtype=float)
+            A = np.asarray(dX0_list, dtype=float)   # shape (m, 2)
+            B = np.asarray(dXt_list, dtype=float)   # shape (m, 2)
 
-            # Need rank 2 in the initial neighbor offsets
+            # Need a genuinely 2D local neighborhood in the initial configuration
             if np.linalg.matrix_rank(A) < 2:
-                FTLE[p, t] = np.nan
                 continue
 
-            # Solve A @ M ≈ B  =>  M ≈ deformation map transpose
-            # Then F = M^T
+            # Solve A @ M ≈ B, then F = M^T
             M, _, _, _ = np.linalg.lstsq(A, B, rcond=None)
             F = M.T
 
@@ -261,14 +322,10 @@ def compute_FTLE_2D_sparse(flow_map, final_time_index, k_neighbors=10):
             lambda_max = np.max(eigvals)
 
             if not np.isfinite(lambda_max) or lambda_max <= 0:
-                FTLE[p, t] = np.nan
                 continue
 
-            FTLE[p, t] = (1.0 / (2.0 * t)) * np.log(lambda_max)
+            FTLE[p, t] = (1.0 / (2.0 * abs(T))) * np.log(lambda_max)
 
     return FTLE
-
-
- 
 
 
