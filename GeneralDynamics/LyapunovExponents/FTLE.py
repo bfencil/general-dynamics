@@ -31,26 +31,6 @@ def compute_FTLE_2D_gridDomain(flow_map, final_time_index, time_array=None):
     FTLE : ndarray, shape (nx, ny, final_time_index+1)
         FTLE field.
         FTLE[:, :, 0] = 0 by definition.
-
-    Notes
-    -----
-    The initial time is always taken to be index 0.
-
-    The deformation gradient is computed as
-
-        F = D Phi_t
-
-    and the Cauchy-Green tensor is
-
-        C = F^T F.
-
-    Then FTLE is computed as
-
-        FTLE = (1 / (2 |T|)) * log(lambda_max(C))
-
-    where
-
-        T = time_array[t] - time_array[0].
     """
 
     flow_map = np.asarray(flow_map, dtype=float)
@@ -74,19 +54,18 @@ def compute_FTLE_2D_gridDomain(flow_map, final_time_index, time_array=None):
         if not np.all(np.isfinite(time_array)):
             raise ValueError("time_array must contain only finite values.")
 
-    # Initial grid (always t = 0)
+    if nx < 3 or ny < 3:
+        raise ValueError("flow_map must have at least 3 grid points in each spatial direction.")
+
+    # Initial grid spacing from t = 0
     x0 = flow_map[:, :, 0, 0]
     y0 = flow_map[:, :, 0, 1]
-
-    if nx < 2 or ny < 2:
-        raise ValueError("flow_map must have at least 2 grid points in each spatial direction.")
 
     delta_x = x0[1, 0] - x0[0, 0]
     delta_y = y0[0, 1] - y0[0, 0]
 
     if not np.isfinite(delta_x) or not np.isfinite(delta_y):
         raise ValueError("Initial grid spacing is not finite.")
-
     if delta_x == 0 or delta_y == 0:
         raise ValueError("Zero grid spacing detected.")
 
@@ -96,50 +75,64 @@ def compute_FTLE_2D_gridDomain(flow_map, final_time_index, time_array=None):
     FTLE = np.full((nx, ny, final_time_index + 1), np.nan, dtype=float)
     FTLE[:, :, 0] = 0.0
 
+    # Interior slice
+    interior = (slice(1, -1), slice(1, -1))
+
     for t in range(1, final_time_index + 1):
         T = float(time_array[t] - time_array[0])
 
         if T == 0:
-            FTLE[:, :, t] = np.nan
             continue
 
         Xt = flow_map[:, :, t, 0]
         Yt = flow_map[:, :, t, 1]
 
-        for i in range(1, nx - 1):
-            for j in range(1, ny - 1):
-                local_values = np.array([
-                    Xt[i - 1, j], Xt[i + 1, j],
-                    Xt[i, j - 1], Xt[i, j + 1],
-                    Yt[i - 1, j], Yt[i + 1, j],
-                    Yt[i, j - 1], Yt[i, j + 1]
-                ], dtype=float)
+        # Central differences on the interior
+        dX_dx0 = (Xt[2:, 1:-1] - Xt[:-2, 1:-1]) / (2.0 * delta_x)
+        dX_dy0 = (Xt[1:-1, 2:] - Xt[1:-1, :-2]) / (2.0 * delta_y)
+        dY_dx0 = (Yt[2:, 1:-1] - Yt[:-2, 1:-1]) / (2.0 * delta_x)
+        dY_dy0 = (Yt[1:-1, 2:] - Yt[1:-1, :-2]) / (2.0 * delta_y)
 
-                if not np.all(np.isfinite(local_values)):
-                    continue
+        # Validity mask: only compute where all needed values are finite
+        valid = (
+            np.isfinite(Xt[2:, 1:-1]) &
+            np.isfinite(Xt[:-2, 1:-1]) &
+            np.isfinite(Xt[1:-1, 2:]) &
+            np.isfinite(Xt[1:-1, :-2]) &
+            np.isfinite(Yt[2:, 1:-1]) &
+            np.isfinite(Yt[:-2, 1:-1]) &
+            np.isfinite(Yt[1:-1, 2:]) &
+            np.isfinite(Yt[1:-1, :-2])
+        )
 
-                # Deformation gradient
-                dX_dx0 = (Xt[i + 1, j] - Xt[i - 1, j]) / (2.0 * delta_x)
-                dX_dy0 = (Xt[i, j + 1] - Xt[i, j - 1]) / (2.0 * delta_y)
-                dY_dx0 = (Yt[i + 1, j] - Yt[i - 1, j]) / (2.0 * delta_x)
-                dY_dy0 = (Yt[i, j + 1] - Yt[i, j - 1]) / (2.0 * delta_y)
+        # Entries of C = F^T F, where
+        # F = [[a, b],
+        #      [c, d]]
+        a = dX_dx0
+        b = dX_dy0
+        c = dY_dx0
+        d = dY_dy0
 
-                F = np.array([
-                    [dX_dx0, dX_dy0],
-                    [dY_dx0, dY_dy0]
-                ], dtype=float)
+        C11 = a * a + c * c
+        C12 = a * b + c * d
+        C22 = b * b + d * d
 
-                C = F.T @ F
-                eigvals = np.linalg.eigvalsh(C)
-                lambda_max = np.max(eigvals)
+        # Largest eigenvalue of symmetric 2x2 matrix:
+        # lambda_max = 0.5 * (trace + sqrt((C11-C22)^2 + 4*C12^2))
+        trace = C11 + C22
+        disc = (C11 - C22) ** 2 + 4.0 * (C12 ** 2)
+        disc = np.maximum(disc, 0.0)  # numerical safety
 
-                if not np.isfinite(lambda_max) or lambda_max <= 0:
-                    continue
+        lambda_max = 0.5 * (trace + np.sqrt(disc))
 
-                FTLE[i, j, t] = (1.0 / (2.0 * abs(T))) * np.log(lambda_max)
+        valid &= np.isfinite(lambda_max) & (lambda_max > 0.0)
+
+        ftle_slice = np.full((nx - 2, ny - 2), np.nan, dtype=float)
+        ftle_slice[valid] = (1.0 / (2.0 * abs(T))) * np.log(lambda_max[valid])
+
+        FTLE[interior[0], interior[1], t] = ftle_slice
 
     return FTLE
-
 
 
 
